@@ -21,6 +21,7 @@ import { SessionMessage } from "./message.js"
 import { SessionProjector } from "./projector.js"
 import { SessionRunner } from "./runner/index.js"
 import { SessionStore } from "./store.js"
+import { S3Workspace } from "../workspace/s3.js"
 
 export class DestinationNotFoundError extends Schema.TaggedError<DestinationNotFoundError>()(
   "Session.DestinationNotFoundError",
@@ -64,6 +65,7 @@ const layer = Layer.effect(
     const admission = yield* SessionInbox.Service
     const database = yield* Database.Service
     const bus = yield* Bus.Service
+    const placement = yield* S3Workspace.Service
 
     const get = Effect.fn("SessionMove.get")(function* (sessionID: Session.ID) {
       const session = yield* store.get(sessionID)
@@ -79,12 +81,20 @@ const layer = Layer.effect(
       const expanded =
         value === "~" ? global.home : value.startsWith("~/") ? path.join(global.home, value.slice(2)) : value
       const directory = AbsolutePath.make(path.resolve(session.location.directory, expanded))
-      const info = yield* fs.stat(directory).pipe(Effect.orElseSucceed(() => undefined))
+      const bound = yield* Effect.try(() => placement.bind({ directory, workspaceID: input.workspaceID })).pipe(
+        Effect.mapError(() => new DestinationUnavailableError({ directory })),
+      )
+      const info = placement.backend
+        ? yield* placement.backend.files.stat(directory).pipe(
+            Effect.map((value) => ({ type: value.type === "directory" ? "Directory" : "File" })),
+            Effect.orElseSucceed(() => undefined),
+          )
+        : yield* fs.stat(directory).pipe(Effect.orElseSucceed(() => undefined))
       if (!info) return yield* new DestinationNotFoundError({ directory })
       if (info.type !== "Directory") return yield* new DestinationNotDirectoryError({ directory })
       const project = yield* projects.resolve(directory)
       const destination: SessionInbox.MovePayload = {
-        location: Location.Ref.make({ directory, workspaceID: input.workspaceID }),
+        location: Location.Ref.make(bound),
         projectID: project.id,
         subpath: RelativePath.make(path.relative(project.directory, directory).replaceAll("\\", "/")),
       }
@@ -103,7 +113,7 @@ const layer = Layer.effect(
 
     const sourceUnavailable = Effect.fn("SessionMove.sourceUnavailable")(function* (session: Session.Info) {
       if (yield* execution.isActive(session.id)) return false
-      if (!(yield* fs.isDir(session.location.directory))) return true
+      if (!placement.backend && !(yield* fs.isDir(session.location.directory))) return true
       return yield* SessionRunner.Service.pipe(
         instances.provide(session),
         Effect.as(false),
@@ -118,6 +128,7 @@ const layer = Layer.effect(
     return Service.of({
       move: Effect.fn("SessionMove.move")(function* (input) {
         const session = yield* get(input.sessionID)
+        if (!placement.accepts(session.location)) return yield* new NotFoundError({ sessionID: input.sessionID })
         const destination = yield* resolveDestination(session, input)
         // Probe outside the inbox lock so cancellation remains available during initialization.
         const unavailable = yield* sourceUnavailable(session)
@@ -175,5 +186,6 @@ export const node = makeGlobalNode({
     Database.node,
     Bus.node,
     SessionProjector.node,
+    S3Workspace.node,
   ],
 })

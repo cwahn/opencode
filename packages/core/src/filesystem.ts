@@ -2,12 +2,13 @@ export * as FileSystem from "./filesystem.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, type Option, type PlatformError, Schema, type Stream } from "effect"
+import { Context, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Location } from "./location.js"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema.js"
 import { FileSystemSearch } from "./filesystem/search.js"
 import { Entry, FileSystem, FindInput, Write } from "@opencode/schema/filesystem"
+import { Environment } from "./environment/index.js"
 export { Entry, Match, Submatch } from "@opencode/schema/filesystem"
 
 export interface ReadInput {
@@ -212,4 +213,89 @@ export const node = makeLocationNode({
   service: Service,
   layer: baseLayer,
   deps: [FSUtil.node, Location.node, FileSystemSearch.node],
+})
+
+/** Serves virtual workspace files without consulting the server's filesystem. */
+export const environmentNode = makeLocationNode({
+  service: Service,
+  deps: [Environment.node, Location.node, FileSystemSearch.node],
+  layer: Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const environment = yield* Environment.Service
+      const location = yield* Location.Service
+      const search = yield* FileSystemSearch.Service
+      const resolve = (input: string) => path.posix.resolve(location.directory, input)
+      const missing = (input: string) => new NotFoundError({ path: RelativePath.make(input) })
+
+      return Service.of({
+        find: search.find,
+        read: Effect.fn("FileSystem.environment.read")(function* (input) {
+          const target = resolve(input.path)
+          const info = yield* environment.files.stat(target).pipe(
+            Effect.catchTag("Environment.NotFound", () => Effect.fail(missing(input.path))),
+            Effect.catchTag("Environment.Failed", Effect.die),
+          )
+          if (info.type !== "file") return yield* missing(input.path)
+
+          return {
+            mime: FSUtil.mimeType(target),
+            size: info.size,
+            mtime: info.mtimeMs > 0 ? Option.some(new Date(info.mtimeMs)) : Option.none(),
+            stream: (options = {}) => {
+              const start = options.offset ?? 0
+              const end = Math.min(info.size, start + (options.bytesToRead ?? info.size))
+              return Stream.unfold(start, (offset) =>
+                offset >= end
+                  ? Effect.succeed(undefined)
+                  : environment.files.read(target, { offset, length: Math.min(256 * 1024, end - offset) }).pipe(
+                      Effect.map((result) =>
+                        result.bytes.length === 0 ? undefined : ([result.bytes, offset + result.bytes.length] as const),
+                      ),
+                      Effect.mapError((cause) =>
+                        PlatformError.systemError({
+                          _tag: cause instanceof Environment.NotFound ? "NotFound" : "Unknown",
+                          module: "FileSystem",
+                          method: "stream",
+                          pathOrDescriptor: target,
+                          cause,
+                        }),
+                      ),
+                    ),
+              )
+            },
+          }
+        }),
+        list: Effect.fn("FileSystem.environment.list")(function* (input = {}) {
+          const directory = resolve(input.path ?? ".")
+          const entries = yield* environment.files.list(directory).pipe(
+            Effect.catchTag(["Environment.NotFound", "Environment.WrongKind"], () =>
+              Effect.fail(missing(input.path ?? ".")),
+            ),
+            Effect.catchTag("Environment.Failed", Effect.die),
+          )
+          return entries
+            .flatMap((entry) =>
+              entry.type === "file" || entry.type === "directory"
+                ? [
+                    Entry.make({
+                      path: RelativePath.make(
+                        path.posix.relative(location.directory, path.posix.join(directory, entry.name)) +
+                          (entry.type === "directory" ? "/" : ""),
+                      ),
+                      type: entry.type,
+                    }),
+                  ]
+                : [],
+            )
+            .sort((a, b) => (a.type === b.type ? a.path.localeCompare(b.path) : a.type === "directory" ? -1 : 1))
+        }),
+        write: Effect.fn("FileSystem.environment.write")(function* (input) {
+          const target = resolve(input.path)
+          yield* environment.files.write(target, input.data).pipe(Effect.orDie)
+          return Write.make({ path: AbsolutePath.make(target) })
+        }),
+      })
+    }),
+  ),
 })

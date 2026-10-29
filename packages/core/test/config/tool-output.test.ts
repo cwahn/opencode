@@ -6,11 +6,13 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { ToolOutput } from "@opencode/core/tool-output"
+import { Location } from "@opencode/core/location"
 import { Document, Event, Info } from "@opencode/schema/config"
 import { ConfigToolOutput } from "@opencode/schema/config/tool-output"
 import { Global } from "@opencode/util/global"
 import { Effect } from "effect"
 import { tmpdir } from "../fixture/tmpdir"
+import { tempLocationLayer } from "../fixture/location"
 import { it } from "../lib/effect"
 import { PluginTestLayer } from "../plugin/fixture"
 
@@ -53,7 +55,10 @@ describe("ConfigToolOutputPlugin.Plugin", () => {
           yield* Effect.die(new Error("Timed out waiting for tool output config reload"))
         }).pipe(
           Effect.provide(
-            AppNodeBuilder.build(ToolOutput.node, [Global.node.replace(Global.layerWith({ data: tmp.path }))]),
+            AppNodeBuilder.build(ToolOutput.node, [
+              Global.node.replace(Global.layerWith({ data: tmp.path })),
+              Location.node.replace(tempLocationLayer),
+            ]),
           ),
         ),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

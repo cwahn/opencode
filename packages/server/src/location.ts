@@ -4,6 +4,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { S3Workspace } from "@opencode/core/workspace/s3"
 import { LocationNotFoundError, InvalidRequestError, ServiceUnavailableError } from "@opencode/protocol/errors"
 import { Effect, Layer, Schema } from "effect"
 import { HttpServerRequest } from "effect/http"
@@ -68,14 +69,20 @@ export const sessionInfo = Effect.fnUntraced(function* (sessions: Session.Interf
   return yield* sessions.get(id).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
 })
 
-export function requestRef(request: HttpServerRequest.HttpServerRequest): Location.Ref {
+export function requestRef(
+  request: HttpServerRequest.HttpServerRequest,
+  placement?: S3Workspace.Interface,
+): Location.Ref {
   const query = new URL(request.url, "http://localhost").searchParams
   const directory =
     query.get("location[directory]") ||
-    (request.headers["x-opencode-directory"] ? decode(request.headers["x-opencode-directory"]) : process.cwd())
-  return Location.Ref.make({
+    (request.headers["x-opencode-directory"]
+      ? decode(request.headers["x-opencode-directory"])
+      : (placement?.backend?.root ?? process.cwd()))
+  const ref = Location.Ref.make({
     directory: AbsolutePath.make(directory),
   })
+  return placement ? placement.bind(ref) : ref
 }
 
 function decode(input: string) {
@@ -90,10 +97,20 @@ export const layer = Layer.effect(
   LocationMiddleware,
   Effect.gen(function* () {
     const locations = yield* LocationServiceMap.Service
+    const placement = yield* S3Workspace.Service
     return LocationMiddleware.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        return yield* effect.pipe(Effect.provide(locations.get(requestRef(request))), locationErrors)
+        const ref = yield* Effect.try(() => requestRef(request, placement)).pipe(
+          Effect.mapError(
+            () =>
+              new LocationNotFoundError({
+                location: { directory: AbsolutePath.make("/workspace") },
+                message: "Invalid S3 location",
+              }),
+          ),
+        )
+        return yield* effect.pipe(Effect.provide(locations.get(ref)), locationErrors)
       }),
     )
   }),

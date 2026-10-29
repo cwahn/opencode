@@ -82,6 +82,10 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       if (options.mode === "service" && process.platform === "win32" && RetainedImage.installed(global.home))
         yield* RetainedImage.retain(global.cache, "service")
       const { start } = yield* Effect.promise(() => import("@opencode/server/process"))
+      const { ServerS3 } = yield* Effect.promise(() => import("@opencode/server/s3"))
+      const s3 = yield* Effect.try(() => ServerS3.fromEnv(process.env))
+      if (s3 && options.mode !== "default")
+        return yield* Effect.fail(new Error("S3 file-only mode is available only with opencode serve"))
       const environmentPassword = yield* Env.password
       // Keep the lease credential out of the environment inherited by tools.
       if (options.mode === "stdio") {
@@ -96,7 +100,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
             : randomBytes(32).toString("base64url")
       if (!password) return yield* Effect.fail(new Error("Missing server password"))
       const instanceID = randomUUID()
-      const transform = yield* WebUi.handler()
+      const transform = s3 ? undefined : yield* WebUi.handler()
       const remote = { urls: [] as ReadonlyArray<string> }
       const launch = start(
         {
@@ -109,6 +113,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           port,
           cors: options.cors ?? config.cors,
           password,
+          s3,
           pty: { handoff },
           simulation: truthy(process.env.OPENCODE_SIMULATE),
           database: {

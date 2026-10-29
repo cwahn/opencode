@@ -17,6 +17,7 @@ import { ProjectSchema } from "./project/schema.js"
 import { ProjectTable, upsertProject } from "./project/sql.js"
 import { ProjectIcon } from "./project/icon.js"
 import { WorktreeTable } from "./worktree/sql.js"
+import { S3Workspace } from "./workspace/s3.js"
 
 export const ID = ProjectSchema.ID
 export type ID = ProjectSchema.ID
@@ -124,6 +125,7 @@ const layer = Layer.effect(
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
     const scope = yield* Scope.Scope
+    const placement = yield* S3Workspace.Service
 
     const announcing = new Set<string>()
     const persist = Effect.fnUntraced(function* (project: Resolved) {
@@ -156,11 +158,12 @@ const layer = Layer.effect(
           : undefined
       const changed = replaced ?? unarchived
       if (changed) yield* bus.publish(ProjectSchema.Event.Updated, fromRow(changed))
-      yield* ProjectIcon.refresh(fs, db, project.id).pipe(
-        Effect.flatMap((row) => (row ? bus.publish(ProjectSchema.Event.Updated, fromRow(row)) : Effect.void)),
-        Effect.ignoreCause,
-        Effect.forkIn(scope),
-      )
+      if (!placement.backend)
+        yield* ProjectIcon.refresh(fs, db, project.id).pipe(
+          Effect.flatMap((row) => (row ? bus.publish(ProjectSchema.Event.Updated, fromRow(row)) : Effect.void)),
+          Effect.ignoreCause,
+          Effect.forkIn(scope),
+        )
       if (!project.vcs) return project
       const directories: Array<{ projectID: ID; directory: AbsolutePath; strategy?: Worktree.StrategyID }> = [
         { projectID: project.id, directory: project.canonical },
@@ -247,6 +250,12 @@ const layer = Layer.effect(
     })
 
     const update = Effect.fn("Project.update")(function* (input: UpdateInput) {
+      if (
+        placement.backend &&
+        (input.projectID !== placement.backend.projectID ||
+          (input.canonical !== undefined && input.canonical !== placement.backend.root))
+      )
+        return yield* new NotFoundError({ projectID: input.projectID })
       const row = yield* db
         .update(ProjectTable)
         .set({
@@ -406,6 +415,16 @@ const layer = Layer.effect(
     })
 
     const resolve = Effect.fn("Project.resolve")(function* (input: AbsolutePath, options?: ResolveOptions) {
+      if (placement.backend) {
+        placement.bind({ directory: input })
+        const project: Resolved = {
+          id: placement.backend.projectID,
+          directory: placement.backend.root,
+          canonical: placement.backend.root,
+        }
+        if (options?.persist !== false) yield* upsertProject(db, project).pipe(Effect.orDie)
+        return project
+      }
       const save = (project: Resolved) => (options?.persist === false ? Effect.succeed(project) : persist(project))
       const directory = AbsolutePath.make(yield* fs.resolve(input))
       const native = yield* fs.up({ targets: [".git", ".hg"], start: directory, mode: "first" }).pipe(
@@ -441,6 +460,7 @@ const layer = Layer.effect(
     })
 
     const sweep = Effect.fn("Project.sweep")(function* () {
+      if (placement.backend) return
       const cutoff = Date.now() - Duration.toMillis(SWEEP_INTERVAL)
       // Projects touched since the cutoff are left alone. Checking again in the update means a
       // resolve that moves the canonical directory mid-sweep bumps time_updated and wins.
@@ -493,7 +513,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: layer,
-  deps: [Bus.node, Database.node, FSUtil.node, Git.node, AppProcess.node],
+  deps: [Bus.node, Database.node, FSUtil.node, Git.node, AppProcess.node, S3Workspace.node],
 })
 
 export const sweepNode = makeGlobalNode({

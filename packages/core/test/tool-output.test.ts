@@ -4,10 +4,12 @@ import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { ToolOutput } from "@opencode/core/tool-output"
+import { Location } from "@opencode/core/location"
 import type { Tool } from "@opencode/core/tool"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { tmpdir } from "./fixture/tmpdir"
+import { tempLocationLayer } from "./fixture/location"
 import { it } from "./lib/effect"
 
 const withStore = <A, E, R>(
@@ -19,6 +21,7 @@ const withStore = <A, E, R>(
     (tmp) => {
       const layer = AppNodeBuilder.build(LayerNode.group([ToolOutput.node, FSUtil.node]), [
         Global.node.replace(Global.layerWith({ data: tmp.path })),
+        Location.node.replace(tempLocationLayer),
       ])
       return Effect.gen(function* () {
         const output = yield* ToolOutput.Service

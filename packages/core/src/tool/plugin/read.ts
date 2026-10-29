@@ -1,7 +1,7 @@
 export * as ReadTool from "./read.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
-import { basename, dirname, join } from "path"
+import { basename, dirname, join, resolve } from "path"
 import { ToolFailure } from "@opencode/ai/effect"
 import { Effect, Schema } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -86,6 +86,27 @@ export const Plugin = {
               // skipped, and discovery failures never fail the read.
               yield* Effect.gen(function* () {
                 if (result.target.externalDirectory !== undefined) return
+                if (location.workspaceID) {
+                  const resolved = resolve(result.target.absolute)
+                  const root = resolve(location.directory)
+                  const candidates: string[] = []
+                  let directory = result.content.type === "list-page" ? resolved : dirname(resolved)
+                  // Virtual paths must not be canonicalized or walked on the host.
+                  while (!FSUtil.contains(directory, root)) {
+                    const file = join(directory, FILENAME)
+                    if (file !== resolved) {
+                      const entries = yield* reader
+                        .list(AbsolutePath.make(directory))
+                        .pipe(Effect.catchTag("Environment.NotFound", () => Effect.succeed(undefined)))
+                      if (entries?.some((entry) => entry.name === FILENAME && entry.type === "file"))
+                        candidates.push(file)
+                    }
+                    directory = dirname(directory)
+                  }
+                  if (candidates.length > 0)
+                    yield* sessionInstructions.load({ sessionID: context.sessionID, paths: candidates })
+                  return
+                }
                 const resolved = yield* fs.resolve(result.target.absolute)
                 const root = yield* fs.resolve(location.directory)
                 // The Location and its ancestors are already supplied by initial instructions,
@@ -145,18 +166,19 @@ export const Plugin = {
 
     const missing = Effect.fn("ReadTool.missing")(function* (input: string, absolute: string) {
       const base = basename(input).toLowerCase()
-      const suggestions = yield* fs.readDirectory(dirname(absolute)).pipe(
-        Effect.map((entries) =>
-          entries
-            .filter((entry) => {
-              const candidate = entry.toLowerCase()
-              return candidate.includes(base) || base.includes(candidate)
-            })
-            .map((entry) => join(dirname(input), entry))
-            .slice(0, 3),
-        ),
-        Effect.orElseSucceed(() => [] as string[]),
-      )
+      const entries = location.workspaceID
+        ? yield* reader.list(AbsolutePath.make(dirname(absolute))).pipe(
+            Effect.map((entries) => entries.map((entry) => entry.name)),
+            Effect.orElseSucceed(() => [] as string[]),
+          )
+        : yield* fs.readDirectory(dirname(absolute)).pipe(Effect.orElseSucceed(() => [] as string[]))
+      const suggestions = entries
+        .filter((entry) => {
+          const candidate = entry.toLowerCase()
+          return candidate.includes(base) || base.includes(candidate)
+        })
+        .map((entry) => join(dirname(input), entry))
+        .slice(0, 3)
       const message =
         suggestions.length === 0
           ? `File not found: ${input}`

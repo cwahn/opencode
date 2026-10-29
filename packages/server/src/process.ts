@@ -22,6 +22,7 @@ import { createRoutes } from "./routes"
 import { ServerInfo } from "./server-info"
 import { Status } from "./service-status"
 import type { ServerOptions } from "./options"
+import { ServerS3 } from "./s3"
 
 export interface Lifecycle<E = never, R = never> {
   readonly onListen: (
@@ -52,6 +53,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   transform?: Transform,
   remoteURLs?: () => ReadonlyArray<string>,
 ) {
+  const s3 = options.s3
+  if (s3) yield* Effect.try(() => ServerS3.validate(s3))
   const password = options.password
   if (!password) return yield* Effect.fail(new Error("Missing server password"))
   const hostname = options.hostname ?? "127.0.0.1"

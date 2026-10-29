@@ -28,6 +28,7 @@ import {
 } from "@opencode/protocol/errors"
 import { AbsolutePath } from "@opencode/core/schema"
 import { locationErrors } from "../location"
+import { S3Workspace } from "@opencode/core/workspace/s3"
 import { failedMessageDecode, failedSnapshot, missingMessage, missingSession } from "./session-error"
 
 function missingForm(id: Form.ID) {
@@ -40,6 +41,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
     const transfer = yield* SessionTransfer.Service
     const instructions = yield* InstructionEntry.Service
     const instances = yield* Instance.Service
+    const placement = yield* S3Workspace.Service
+    const defaultDirectory = () => placement.backend?.root ?? AbsolutePath.make(process.cwd())
     const requireSession = (sessionID: Session.ID) =>
       session.get(sessionID).pipe(Effect.catchTag("Session.NotFoundError", missingSession))
     const requireOwnedForm = Effect.fnUntraced(function* (sessionID: Form.Info["sessionID"], formID: Form.ID) {
@@ -111,7 +114,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                 metadata: ctx.payload.metadata,
                 permissions: ctx.payload.permissions,
                 ...(ctx.payload.parentID === undefined
-                  ? { location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) } }
+                  ? { location: ctx.payload.location ?? { directory: defaultDirectory() } }
                   : { parentID: ctx.payload.parentID }),
               })
               .pipe(Effect.catchTag("Session.NotFoundError", missingSession)),
@@ -125,7 +128,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
             data: yield* transfer
               .import({
                 data: { info: ctx.payload.info, messages: ctx.payload.messages },
-                location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
+                location: ctx.payload.location ?? { directory: defaultDirectory() },
               })
               .pipe(
                 Effect.catchTag("Session.NotFoundError", missingSession),

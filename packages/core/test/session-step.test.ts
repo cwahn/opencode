@@ -18,16 +18,19 @@ import { SessionStep } from "@opencode/core/session/runner/step"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { Snapshot } from "@opencode/core/snapshot"
 import { ToolOutput } from "@opencode/core/tool-output"
+import { Location } from "@opencode/core/location"
 import { Money } from "@opencode/schema/money"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
 import { Effect, Exit, Layer } from "effect"
 import { testEffect } from "./lib/effect"
+import { tempLocationLayer } from "./fixture/location"
 
 const it = testEffect(
   Layer.merge(
     AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node]), [
       Bus.node.replace(Bus.configured({ persist: true })),
+      Location.node.replace(tempLocationLayer),
     ]),
     TestLLM.testLayer(),
   ),

@@ -2,13 +2,15 @@ export * as ToolOutput from "./tool-output.js"
 
 import path from "path"
 import type { Tool } from "./tool.js"
-import { Context, Duration, Effect, Layer, Schedule } from "effect"
+import { Clock, Context, Duration, Effect, Layer, Ref, Schedule } from "effect"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Identifier } from "@opencode/schema/identifier"
 import { FileRetention } from "./file-retention.js"
 import { State } from "./state.js"
+import { Environment } from "./environment/index.js"
+import { Location } from "./location.js"
 
 export const MAX_LINES = 2_000
 export const MAX_BYTES = 50 * 1024 // 50 KiB
@@ -54,7 +56,39 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
-    const directory = path.join(global.data, DIRECTORY)
+    const location = yield* Location.Service
+    const environment = yield* Environment.Service
+    const directory = location.workspaceID
+      ? path.join(location.project.directory, ".opencode", DIRECTORY)
+      : path.join(global.data, DIRECTORY)
+    const cleaned = yield* Ref.make(false)
+    const cleanupWorkspace = Effect.fn("ToolOutput.cleanupWorkspace")(function* () {
+      const cutoff = (yield* Clock.currentTimeMillis) - Duration.toMillis(RETENTION)
+      const entries = yield* environment.files.list(directory).pipe(
+        Effect.catchTag("Environment.NotFound", () => Effect.succeed([])),
+        Effect.orDie,
+      )
+      yield* Effect.forEach(
+        entries.filter((entry) => entry.type === "file" && /^tool_[0-9a-f]{12}/.test(entry.name)),
+        (entry) =>
+          Effect.gen(function* () {
+            const file = path.join(directory, entry.name)
+            const info = yield* environment.files.stat(file).pipe(
+              Effect.catchTag("Environment.NotFound", () => Effect.succeed(undefined)),
+              Effect.orDie,
+            )
+            if (!info || info.mtimeMs >= cutoff) return
+            yield* environment.files.remove(file).pipe(Effect.orDie)
+          }),
+        { concurrency: 8, discard: true },
+      )
+    })
+    const writeWorkspace = Effect.fnUntraced(function* (file: string, bytes: Uint8Array) {
+      // Workspace retention is demand-driven; no background task wakes a remote workspace.
+      if (!(yield* Ref.getAndSet(cleaned, true))) yield* cleanupWorkspace()
+      yield* environment.files.mkdir(directory).pipe(Effect.orDie)
+      yield* environment.files.write(file, bytes).pipe(Effect.orDie)
+    })
     const state = State.create<Limits, Editor>({
       name: "tool-output",
       initial: () => ({ maxLines: MAX_LINES, maxBytes: MAX_BYTES }),
@@ -86,8 +120,12 @@ const layer = Layer.effect(
         bytes += size
       }
       const file = path.join(directory, fileName())
-      yield* fs.ensureDir(directory).pipe(Effect.orDie)
-      yield* fs.writeFileString(file, text).pipe(Effect.orDie)
+      yield* location.workspaceID
+        ? writeWorkspace(file, new TextEncoder().encode(text))
+        : Effect.gen(function* () {
+            yield* fs.ensureDir(directory).pipe(Effect.orDie)
+            yield* fs.writeFileString(file, text).pipe(Effect.orDie)
+          })
       const shown = kept.length > 0 ? `lines 1-${kept.length}` : "0 lines"
       const marker = `[showing ${shown} of ${lines.length}; full output saved to ${file}]`
       const bounded: Tool.Content[] = []
@@ -121,7 +159,7 @@ const layer = Layer.effect(
 
     const save = Effect.fnUntraced(function* (bytes: Uint8Array, extension: string) {
       const file = path.join(directory, fileName() + extension)
-      yield* fs.writeWithDirs(file, bytes).pipe(Effect.orDie)
+      yield* location.workspaceID ? writeWorkspace(file, bytes) : fs.writeWithDirs(file, bytes).pipe(Effect.orDie)
       return file
     })
 
@@ -130,7 +168,7 @@ const layer = Layer.effect(
       reload: state.reload,
       truncate,
       save,
-      cleanup: () => cleanup(fs, directory),
+      cleanup: () => (location.workspaceID ? cleanupWorkspace() : cleanup(fs, directory)),
     })
   }),
 )
@@ -155,5 +193,5 @@ const cleanupNode = makeGlobalNode({
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [FSUtil.node, Global.node, cleanupNode],
+  deps: [FSUtil.node, Global.node, cleanupNode, Location.node, Environment.node],
 })

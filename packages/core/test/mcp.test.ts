@@ -62,7 +62,7 @@ import { advance, drain } from "./lib/clock"
 import { testEffect } from "./lib/effect"
 import { registerIntegrationPolicy, setOrganizationPolicy } from "./fixture/policy"
 import { imagePassthrough } from "./lib/image"
-import { location } from "./fixture/location"
+import { location, tempLocationLayer } from "./fixture/location"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { hostEnvironmentLayer, recordingEnvironmentLayer } from "./fixture/environment"
 import {
@@ -564,6 +564,7 @@ const it = testEffect(
     Bus.node.replace(events),
     Image.node.replace(imagePassthrough),
     Global.node.replace(Global.layerWith({ data: outputData })),
+    Location.node.replace(tempLocationLayer),
   ]),
 )
 
@@ -1598,7 +1599,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
         'const resource = await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://readme" }); return resource.contents[0].text',
       )
       const bounded = yield* ToolOutput.Service.use((output) => output.truncate(large)).pipe(
-        Effect.provide(AppNodeBuilder.build(ToolOutput.node)),
+        Effect.provide(AppNodeBuilder.build(ToolOutput.node, [Location.node.replace(tempLocationLayer)])),
       )
       expect(bounded.metadata?.truncated).toBe(true)
       expect(bounded.content[0]).toMatchObject({ type: "text" })
@@ -2371,6 +2372,7 @@ testEffect(Layer.empty).live("preserves plugin transforms through MCP catalog up
             ),
             Permission.node.replace(Layer.mock(Permission.Service, { assert: () => Effect.void })),
             Image.node.replace(imagePassthrough),
+            Location.node.replace(tempLocationLayer),
           ]),
         ),
       ),
@@ -2414,6 +2416,7 @@ testEffect(Layer.empty).effect("coalesces queued MCP tool notifications after in
         ),
         Permission.node.replace(Layer.mock(Permission.Service, { assert: () => Effect.void })),
         Image.node.replace(imagePassthrough),
+        Location.node.replace(tempLocationLayer),
       ]),
     ),
   )

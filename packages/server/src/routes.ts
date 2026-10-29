@@ -34,6 +34,7 @@ import { PluginUpdate } from "@opencode/core/plugin/update"
 import { SdkPlugins } from "@opencode/core/plugin/sdk"
 import { WellKnown } from "@opencode/core/wellknown"
 import { Workspace } from "@opencode/core/workspace"
+import { S3Workspace } from "@opencode/core/workspace/s3"
 import { Watcher } from "@opencode/core/filesystem/watcher"
 import { FileWatch } from "@opencode/core/filesystem/file-watch"
 import { HttpRouter } from "effect/http"
@@ -51,6 +52,7 @@ import { formLocationLayer } from "./middleware/form-location"
 import { sessionLocationLayer } from "./middleware/session-location"
 import { ServerInfo } from "./server-info"
 import type { ServerOptions } from "./options"
+import { ServerS3 } from "./s3"
 
 const applicationServiceNodes = [
   Global.node,
@@ -81,6 +83,7 @@ const applicationServiceNodes = [
   Schedule.node,
   Workspace.node,
   FileWatch.node,
+  S3Workspace.node,
 ] as const
 const applicationServices = LayerNode.group(applicationServiceNodes)
 
@@ -89,6 +92,24 @@ export function createRoutes(
   serviceURLs: () => ReadonlyArray<string> = () => [],
   overrides: LayerNode.Replacements = [],
 ) {
+  if (options.s3) {
+    const s3 = ServerS3.validate(options.s3)
+    const identity = S3Workspace.identity(s3)
+    options = {
+      ...options,
+      s3,
+      database: {
+        ...options.database,
+        path:
+          options.database?.path === ":memory:"
+            ? ":memory:"
+            : `${options.database?.path ?? "opencode.db"}.s3-${identity}`,
+      },
+      config: { ...options.config, project: false, claude: false },
+      fs: { filewatcher: false, fff: false },
+    }
+    overrides = [...ServerS3.replacements(s3), ...overrides]
+  }
   return makeRoutes(
     options.password
       ? ServerAuth.Config.configLayer({ password: Option.some(options.password) })
@@ -194,7 +215,13 @@ function makeRoutes<AuthError, AuthServices>(
         Layer.provideMerge(services),
         Layer.provideMerge(HttpRouter.layer),
       )
-      return Layer.merge(api, V1Migration.layer.pipe(Layer.provide(services)))
+      const backend = Context.get(context, S3Workspace.Service).backend
+      const bootstrap = backend
+        ? Layer.effectDiscard(
+            Context.get(context, Workspace.Service).create({ id: backend.workspaceID, provider: "s3" }),
+          ).pipe(Layer.provide(services))
+        : Layer.empty
+      return Layer.mergeAll(api, bootstrap, ...(backend ? [] : [V1Migration.layer.pipe(Layer.provide(services))]))
     }),
   )
 }

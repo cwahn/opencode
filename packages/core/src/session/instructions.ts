@@ -1,6 +1,6 @@
 export * as SessionInstructions from "./instructions.js"
 
-import { relative } from "path"
+import { relative, resolve } from "path"
 import { Context, Effect, Layer, Option, Ref, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
@@ -12,6 +12,7 @@ import { MessageDecodeError } from "./error.js"
 import { SessionHistory } from "./history.js"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
+import { Environment } from "../environment/index.js"
 
 const InjectedMetadata = Schema.Struct({
   instruction: Schema.Struct({ paths: Schema.Array(Schema.String) }),
@@ -33,10 +34,13 @@ const layer = Layer.effect(
     const fs = yield* FSUtil.Service
     const db = (yield* Database.Service).db
     const location = yield* Location.Service
+    const environment = yield* Environment.Service
     // Resolved once for the Location layer; the synthetic text and dedup ledger keep
     // absolute paths, but the human-facing description shows paths relative to the project
     // root so opening a subdirectory still describes paths from the project root.
-    const root = yield* fs.resolve(location.project.directory)
+    const root = location.workspaceID
+      ? resolve(location.project.directory)
+      : yield* fs.resolve(location.project.directory)
     // Same-step parallel reads settle concurrently, so an in-memory claim guards each
     // Session/path pair while a load is in flight. The claim is released once the load
     // settles: the synthetic message metadata scanned below is the only lasting ledger,
@@ -61,9 +65,14 @@ const layer = Layer.effect(
         const files = yield* Effect.forEach(
           toInject,
           (path) =>
-            fs
-              .readFileStringSafe(path)
-              .pipe(Effect.map((content) => (content === undefined ? undefined : { path, content }))),
+            (location.workspaceID
+              ? environment.files.read(path).pipe(
+                  Effect.map((file) => new TextDecoder().decode(file.bytes)),
+                  Effect.catchTag("Environment.NotFound", () => Effect.succeed(undefined)),
+                  Effect.orDie,
+                )
+              : fs.readFileStringSafe(path)
+            ).pipe(Effect.map((content) => (content === undefined ? undefined : { path, content }))),
           { concurrency: "unbounded" },
         )
         const readable = files.filter((file): file is { path: string; content: string } => file !== undefined)
@@ -122,5 +131,5 @@ function describePath(root: string, path: string) {
 export const node = makeLocationNode({
   name: "session-instructions",
   layer,
-  deps: [Bus.node, Database.node, FSUtil.node, Location.node],
+  deps: [Bus.node, Database.node, FSUtil.node, Location.node, Environment.node],
 })

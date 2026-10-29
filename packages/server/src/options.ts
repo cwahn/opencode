@@ -2,8 +2,10 @@ import { Database } from "@opencode/core/database/database"
 import { ModelsDev } from "@opencode/core/models-dev"
 import { PersistentPty } from "@opencode/core/persistent-pty"
 import { Schema } from "effect"
+import { ServerS3 } from "./s3"
 
 export const ServerOptions = Schema.Struct({
+  s3: Schema.optional(ServerS3.Options),
   app: Schema.optional(
     Schema.Struct({
       name: Schema.optional(Schema.String),

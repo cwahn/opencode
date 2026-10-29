@@ -18,6 +18,7 @@ import { Skill } from "../skill.js"
 import { SessionBlob } from "./blob.js"
 import { AttachmentError, SkillNotFoundError } from "./error.js"
 import { SessionStored } from "./stored.js"
+import { S3Workspace } from "../workspace/s3.js"
 
 // Image types the resizer can decode; others such as HEIC and AVIF go to the provider unchanged.
 const RESIZABLE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"])
@@ -52,9 +53,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     delivery: request.input.delivery ?? "steer",
   })
   const input = event.prompt
-  const files = input.files
-    ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })
-    : undefined
+  const files = input.files ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 }) : undefined
   const requested = input.skills
   const selected = yield* Effect.gen(function* () {
     if (!requested?.length) return undefined
@@ -174,6 +173,58 @@ const readFileAttachment = Effect.fn("SessionPrompt.readFileAttachment")(functio
     try: () => new URL(uri),
     catch: () => new AttachmentError({ uri, message: `Invalid attachment URI: ${uri}` }),
   })
+  const workspace = yield* Effect.serviceOption(S3Workspace.Service)
+  const backend = Option.getOrUndefined(workspace)?.backend
+  if (backend && (url.protocol === "s3:" || url.protocol === "file:")) {
+    const target = yield* Effect.try({
+      try: () => {
+        const target = url.protocol === "s3:" ? backend.files.fromUri(uri.split(/[?#]/, 1)[0]) : fileURLToPath(url)
+        if (!target) throw new Error("Object is outside the configured S3 bucket/prefix")
+        return target
+      },
+      catch: () => new AttachmentError({ uri, message: `Attachment is outside the S3 workspace: ${uri}` }),
+    })
+    const info = yield* backend.files
+      .stat(target)
+      .pipe(Effect.mapError(() => new AttachmentError({ uri, message: `Unable to read attachment: ${uri}` })))
+    if (info.type === "directory") {
+      const entries = yield* backend.files
+        .list(target)
+        .pipe(Effect.mapError(() => new AttachmentError({ uri, message: `Unable to read attachment: ${uri}` })))
+      return {
+        bytes: Buffer.from(
+          entries
+            .filter((entry) => entry.type === "file" || entry.type === "directory")
+            .toSorted((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1))
+            .map((entry) => entry.name + (entry.type === "directory" ? "/" : ""))
+            .join("\n"),
+        ),
+        source: { type: "uri" as const, uri },
+        start: undefined,
+        end: undefined,
+        name: path.posix.basename(target),
+        mime: "application/x-directory",
+      }
+    }
+    if (info.type !== "file") return yield* new AttachmentError({ uri, message: `Attachment is not a file: ${uri}` })
+    if (info.size > MAX_ATTACHMENT_BYTES)
+      return yield* new AttachmentError({
+        uri,
+        message: `Attachment exceeds the ${MAX_ATTACHMENT_BYTES} byte limit: ${uri}`,
+      })
+
+    const result = yield* backend.files
+      .read(target, { offset: 0, length: MAX_ATTACHMENT_BYTES + 1 })
+      .pipe(Effect.mapError(() => new AttachmentError({ uri, message: `Unable to read attachment: ${uri}` })))
+    return {
+      bytes: result.bytes,
+      source: { type: "uri" as const, uri },
+      start: positiveInt(url.searchParams.get("start")),
+      end: positiveInt(url.searchParams.get("end")),
+      name: path.posix.basename(target),
+      mime: undefined,
+    }
+  }
   if (url.protocol !== "file:")
     return yield* new AttachmentError({ uri, message: `Unsupported attachment URI: ${uri}` })
   const start = positiveInt(url.searchParams.get("start"))

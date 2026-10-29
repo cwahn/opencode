@@ -21,6 +21,7 @@ import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
 import { SessionProjector } from "./projector.js"
 import { SessionMessageTable, SessionTable } from "./sql.js"
+import { S3Workspace } from "../workspace/s3.js"
 
 export const Data = SessionTransfer.Data
 export type Data = SessionTransfer.Data
@@ -51,6 +52,7 @@ const layer = Layer.effect(
     const { db } = yield* Database.Service
     const projects = yield* Project.Service
     const sessions = yield* Session.Service
+    const placement = yield* S3Workspace.Service
     const encodeMessage = Schema.encodeSync(SessionMessage.Info)
 
     return Service.of({
@@ -62,6 +64,7 @@ const layer = Layer.effect(
         return input.sanitize ? sanitize(data) : data
       }),
       import: Effect.fn("SessionTransfer.import")(function* (input) {
+        const location = placement.bind(input.location)
         const sessionID = input.data.info.id
         const recorded = yield* db
           .select({ id: SessionTable.id })
@@ -71,7 +74,7 @@ const layer = Layer.effect(
           .pipe(Effect.orDie)
         if (recorded) return yield* new ImportConflictError({ sessionID })
         if (input.data.info.parentID) yield* sessions.get(input.data.info.parentID)
-        const project = yield* projects.resolve(input.location.directory)
+        const project = yield* projects.resolve(location.directory)
         yield* upsertProject(db, project).pipe(Effect.orDie)
         const importedAt = yield* Clock.currentTimeMillis
         const messages = input.data.messages.filter(isSettled).map((message, index) => {
@@ -95,10 +98,8 @@ const layer = Layer.effect(
               slug: Slug.create(),
               version: app.version,
               projectID: project.id,
-              location: input.location,
-              subpath: RelativePath.make(
-                path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
-              ),
+              location,
+              subpath: RelativePath.make(path.relative(project.directory, location.directory).replaceAll("\\", "/")),
               title: input.data.info.title,
               agent: input.data.info.agent,
               model: input.data.info.model,
@@ -106,7 +107,7 @@ const layer = Layer.effect(
               permissions: input.data.info.permissions,
             },
             {
-              location: input.location,
+              location,
               commit: (seq) =>
                 Effect.gen(function* () {
                   if (messages.length > 0) {
@@ -159,7 +160,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [App.node, Bus.node, Database.node, Project.node, Session.node],
+  deps: [App.node, Bus.node, Database.node, Project.node, Session.node, S3Workspace.node],
 })
 
 function isSettled(message: SessionMessage.Info) {

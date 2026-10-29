@@ -67,6 +67,7 @@ import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
+import { S3Workspace } from "./workspace/s3.js"
 
 // get project -> project.locations
 //
@@ -280,6 +281,7 @@ const layer = Layer.effect(
     const environments = yield* SessionEnvironment.Service
     const locations = yield* LocationServiceMap.Service
     const sessions = yield* Session.make()
+    const placement = yield* S3Workspace.Service
     // `experimental.media_blob` as the session's own location configures it, where its media is written.
     const keepsMediaRefs = (session: SessionSchema.Info) =>
       SessionBlob.enabled.pipe(
@@ -297,10 +299,15 @@ const layer = Layer.effect(
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
-        if (recorded) return recorded
+        if (recorded) {
+          if (!placement.accepts(recorded.location)) return yield* new NotFoundError({ sessionID })
+          return recorded
+        }
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
-        const location = parent?.location ?? (input.location && LocationServiceMap.canonical(input.location))
+        if (parent && !placement.accepts(parent.location)) return yield* new NotFoundError({ sessionID: parent.id })
+        const location =
+          parent?.location ?? (input.location && placement.bind(LocationServiceMap.canonical(input.location)))
         if (location === undefined)
           return yield* Effect.die(new Error("Session.create requires either location or an existing parentID"))
         const project = yield* projects.resolve(location.directory)
@@ -341,7 +348,10 @@ const layer = Layer.effect(
                 )
             }),
           )
-        if (projected.type === "existing") return projected.session
+        if (projected.type === "existing") {
+          if (!placement.accepts(projected.session.location)) return yield* new NotFoundError({ sessionID })
+          return projected.session
+        }
         // TODO: Restore recorded sessions onto replacement synchronized workspaces in a future API slice.
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
@@ -386,7 +396,11 @@ const layer = Layer.effect(
         })
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
-      get: (sessionID) => sessions.forSession(sessionID).get(),
+      get: Effect.fn("Session.get")(function* (sessionID) {
+        const session = yield* sessions.forSession(sessionID).get()
+        if (!placement.accepts(session.location)) return yield* new NotFoundError({ sessionID })
+        return session
+      }),
       environment: Effect.fn("Session.environment")(function* (input) {
         yield* result.get(input.sessionID)
         if (input.variables !== undefined) yield* environments.set(input.sessionID, input.variables)
@@ -562,5 +576,6 @@ export const node: LayerNode.Provider<Service, never, typeof Node.tags.values.gl
     LocationServiceMap.node,
     FSUtil.node,
     App.node,
+    S3Workspace.node,
   ],
 })
