@@ -109,7 +109,7 @@ test("optional S3 origin is narrowly allowed, cannot redirect away, and is denie
     fetch(request) {
       const url = new URL(request.url)
       if (url.pathname === "/same") return Response.redirect(new URL("/ok", url))
-      if (url.pathname === "/escape") return Response.redirect(`http://127.0.0.1:${server.port}/ok`)
+      if (url.pathname === "/escape") return Response.redirect(`http://127.0.0.1:${url.port}/ok`)
       return new Response("real S3 endpoint")
     },
   })
