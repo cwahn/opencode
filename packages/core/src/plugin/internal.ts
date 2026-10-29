@@ -109,6 +109,7 @@ import { VcsGitPlugin } from "./vcs/git.js"
 import { VerbosityPlugin } from "./verbosity.js"
 import { WarmingPlugin } from "./warming.js"
 import { WellKnownPlugin } from "../wellknown/plugin.js"
+import { OauthCallbackListener } from "../oauth/callback-listener.js"
 
 const services = [
   Agent.Service,
@@ -161,6 +162,7 @@ const services = [
   WellKnown.Service,
   Worktree.Service,
   WorktreeStrategies.Service,
+  OauthCallbackListener.Service,
 ] as const
 
 export type Requirements = Context.Service.Identifier<(typeof services)[number]>
@@ -216,6 +218,7 @@ export const requirements = LayerNode.group([
   WellKnown.node,
   Worktree.node,
   WorktreeStrategies.node,
+  OauthCallbackListener.node,
 ])
 
 export type InternalPlugin = Plugin<Requirements | Scope.Scope>

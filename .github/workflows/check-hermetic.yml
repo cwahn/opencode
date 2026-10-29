@@ -1,0 +1,106 @@
+name: check-hermetic
+
+on:
+  push:
+    branches: [s3-headless]
+  pull_request:
+    paths:
+      - .github/workflows/check-hermetic.yml
+      - .github/actions/setup-minio/**
+      - .github/actions/setup-bun/**
+      - packages/**
+      - script/**
+      - patches/**
+      - package.json
+      - bun.lock
+      - bunfig.toml
+      - tsconfig.json
+      - turbo.json
+      - .oxlintrc.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  integration:
+    name: offline S3 and OAuth integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      OPENCODE_TEST_REQUIRE_S3: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install Bun and locked dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Provision test tools before network isolation
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep=14.1.0-1
+          command -v unshare
+          command -v setpriv
+          command -v ip
+          command -v jq
+          bun --version
+          rg --version
+
+      - name: Provision MinIO before network isolation
+        uses: ./.github/actions/setup-minio
+
+      - name: Run package harnesses with loopback only
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No veth, host interface, or default route. Failure to unshare is fatal; there is no online fallback.
+          # Clear inherited credentials and drop root before starting any test or fixture child process.
+          sudo unshare --net -- bash -c '
+            set -euo pipefail
+            ip link set lo up
+            exec setpriv --reuid "$1" --regid "$2" --init-groups --no-new-privs \
+              env -i PATH="$3" HOME="$4" GITHUB_WORKSPACE="$5" RUNNER_TEMP="$6" \
+              OPENCODE_TEST_MINIO_BINARY="$7" OPENCODE_TEST_REQUIRE_S3=1 CI=true \
+              bash "$5/.github/actions/setup-minio/test-offline.sh"
+          ' -- "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$OPENCODE_TEST_MINIO_BINARY"
+
+      - name: Preserve offline test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hermetic-test-results
+          path: ${{ runner.temp }}/hermetic-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  checks:
+    name: lint, typechecks, and server build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install Bun and locked dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Canonical root check
+        run: bun run check
+
+      - name: Official TypeScript check
+        run: bun run typecheck:tsc
+
+      - name: Build server
+        working-directory: packages/server
+        run: bun run build

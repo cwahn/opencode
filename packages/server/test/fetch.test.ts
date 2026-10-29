@@ -1,11 +1,11 @@
 import { expect } from "bun:test"
 import fs from "node:fs/promises"
-import { createServer } from "node:http"
+import { OauthCallbackListener } from "@opencode/core/oauth/callback-listener"
 import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Integration } from "@opencode/schema/integration"
 import { ServerInfo } from "@opencode/protocol/groups/server"
-import { Effect, Schedule, Schema } from "effect"
+import { Effect, Layer, Schedule, Schema } from "effect"
 import { Session } from "@opencode/schema/session"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
@@ -126,65 +126,20 @@ it.live("manages a session whose directory was deleted", () =>
 
 type Handler = (request: Request) => Promise<Response>
 
-function occupy(port: number, cancel = false) {
-  return Effect.gen(function* () {
-    const requests: string[] = []
-    // A localhost listener occupies only one family; Bun can bind the other.
-    const servers = ["127.0.0.1", "::1"].map((host) => ({
-      host,
-      server: createServer((request, response) => {
-        requests.push(request.url ?? "")
-        response.end(cancel ? "cancelled" : "still running", () => {
-          if (cancel)
-            servers.forEach((item) => {
-              // Bun clears its native handle in close(), so force-close connections first.
-              item.server.closeAllConnections()
-              item.server.close()
-            })
-        })
-      }),
-    }))
-    yield* Effect.addFinalizer(() =>
-      Effect.forEach(servers, (item) =>
-        Effect.callback<void>((resume) => {
-          item.server.closeAllConnections()
-          item.server.close(() => resume(Effect.void))
-        }),
-      ),
-    )
-    yield* Effect.forEach(servers, (item) =>
-      Effect.callback<void, Error>((resume) => {
-        const onError = (error: Error) => resume(Effect.fail(error))
-        item.server.once("error", onError)
-        item.server.listen(port, item.host, () => {
-          item.server.off("error", onError)
-          resume(Effect.void)
-        })
-      }),
-    )
-    return requests
-  })
-}
-
 const connectOpenAI = (handler: Handler) =>
   Effect.gen(function* () {
-    // Catalog endpoints no longer wait for plugin initialization.
-    yield* Effect.gen(function* () {
-      const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/integration")))
-      expect(response.status).toBe(200)
-      const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Integration.Info) }))(
-        yield* Effect.promise(() => response.json()),
-      )
-      return body.data.some(
+    const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/integration")))
+    expect(response.status).toBe(200)
+    const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Integration.Info) }))(
+      yield* Effect.promise(() => response.json()),
+    )
+    expect(
+      body.data.some(
         (integration) =>
           integration.id === "openai" &&
           integration.methods.some((method) => method.type === "oauth" && method.id === "chatgpt-browser"),
-      )
-    }).pipe(
-      Effect.filterOrFail((ready) => ready),
-      Effect.retry(Schedule.spaced("10 millis")),
-      Effect.timeout("2 seconds"),
-    )
+      ),
+    ).toBe(true)
     return yield* Effect.promise(() =>
       handler(
         new Request("http://opencode.local/api/integration/openai/connect/oauth", {
@@ -423,51 +378,53 @@ it.live("returns 404 when a previously readable file is deleted", () =>
   ).pipe(Effect.scoped),
 )
 
-it.live("cancels a stale OpenAI OAuth callback server before falling back", () =>
-  Effect.gen(function* () {
-    const requests = yield* occupy(1455, true)
-    const handler = yield* ServerFetch.make(options)
-    const response = yield* connectOpenAI(handler)
-
-    expect(response.status).toBe(200)
-    expect(requests).toContain("/cancel")
-    const body = (yield* Effect.promise(() => response.json())) as { data: { url: string } }
-    expect(new URL(body.data.url).searchParams.get("redirect_uri")).toBe("http://localhost:1455/auth/callback")
-  }),
-)
-
-it.live("falls back to port 1457 when OpenAI OAuth port 1455 remains busy", () =>
-  Effect.gen(function* () {
-    const requests = yield* occupy(1455)
-    const handler = yield* ServerFetch.make(options)
-    const response = yield* connectOpenAI(handler)
-
-    expect(response.status).toBe(200)
-    expect(requests).toContain("/cancel")
-    const body = (yield* Effect.promise(() => response.json())) as { data: { url: string } }
-    expect(new URL(body.data.url).searchParams.get("redirect_uri")).toBe("http://localhost:1457/auth/callback")
-  }),
-)
-
-it.live(
-  "explains how to recover when both OpenAI OAuth callback ports are busy",
-  () =>
+for (const port of [1455, 1457])
+  it.live(`routes OpenAI browser authorization through the callback listener (${port})`, () =>
     Effect.gen(function* () {
-      yield* occupy(1455)
-      yield* occupy(1457)
-      const handler = yield* ServerFetch.make(options)
-      const response = yield* connectOpenAI(handler)
-
-      expect(response.status).toBe(400)
-      expect(yield* Effect.promise(() => response.json())).toEqual({
-        _tag: "InvalidRequestError",
-        message:
-          "OpenAI browser login needs local port 1455 or 1457, but both are already in use. Stop the processes using those ports or choose Codex device code (legacy), then try again.",
-        kind: "integration_authorization",
+      const policies: OauthCallbackListener.Policy[] = []
+      const handler = yield* ServerFetch.make(options, {
+        overrides: [
+          OauthCallbackListener.node.replace(
+            Layer.succeed(OauthCallbackListener.Service, {
+              listen: (_handler, policy) =>
+                Effect.sync(() => {
+                  policies.push(policy)
+                  return port
+                }),
+            }),
+          ),
+        ],
       })
+      const response = yield* connectOpenAI(handler)
+      expect(response.status).toBe(200)
+      expect(policies).toHaveLength(1)
+      expect(policies[0]).toMatchObject({ port: 1455, fallbackPort: 1457, attempts: 10, retryDelay: 200 })
+      const body = (yield* Effect.promise(() => response.json())) as { data: { url: string } }
+      expect(new URL(body.data.url).searchParams.get("redirect_uri")).toBe(`http://localhost:${port}/auth/callback`)
     }),
-  // Real retries wait 18 * 200 ms; startup and scoped cleanup also count toward the deadline.
-  { timeout: 10_000 },
+  )
+
+it.live("explains how to recover when both OpenAI OAuth callback ports are busy", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options, {
+      overrides: [
+        OauthCallbackListener.node.replace(
+          Layer.succeed(OauthCallbackListener.Service, {
+            listen: (_handler, policy) => Effect.fail(new Error(policy.exhausted)),
+          }),
+        ),
+      ],
+    })
+    const response = yield* connectOpenAI(handler)
+
+    expect(response.status).toBe(400)
+    expect(yield* Effect.promise(() => response.json())).toEqual({
+      _tag: "InvalidRequestError",
+      message:
+        "OpenAI browser login needs local port 1455 or 1457, but both are already in use. Stop the processes using those ports or choose Codex device code (legacy), then try again.",
+      kind: "integration_authorization",
+    })
+  }),
 )
 
 it.live("serves the session view operation and missing-session error", () =>

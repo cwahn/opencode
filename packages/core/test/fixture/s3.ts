@@ -4,14 +4,26 @@ import { tmpdir } from "./tmpdir.js"
 
 export type S3Fixture = Options & AsyncDisposable
 
-/** Explicit paths are considered available so invalid opt-ins fail setup rather than silently skip. */
-export const hasS3Fixture = () =>
-  Boolean(process.env.OPENCODE_TEST_MINIO_BINARY || process.env.MINIO_BINARY || Bun.which("minio"))
+/** Required integration jobs must fail closed instead of silently losing coverage. */
+export const hasS3Fixture = () => {
+  const required = process.env.OPENCODE_TEST_REQUIRE_S3 === "1"
+  if (required && process.env.OPENCODE_TEST_S3_ENDPOINT)
+    throw new Error("Required hermetic S3 tests cannot use OPENCODE_TEST_S3_ENDPOINT; use a private MinIO fixture")
+  // An explicit invalid path is available here so fixture setup reports the actionable error.
+  const available = Boolean(
+    process.env.OPENCODE_TEST_MINIO_BINARY ||
+      process.env.MINIO_BINARY ||
+      Bun.which("minio", { PATH: process.env.PATH ?? "" }),
+  )
+  if (required && !available)
+    throw new Error("Required S3 test dependency missing: install MinIO or set OPENCODE_TEST_MINIO_BINARY")
+  return available
+}
 
 /** A private, loopback-only S3 bucket. Install MinIO separately; tests never download binaries. */
 export async function s3Fixture(): Promise<S3Fixture> {
   const requested = process.env.OPENCODE_TEST_MINIO_BINARY ?? process.env.MINIO_BINARY ?? "minio"
-  const binary = Bun.which(requested)
+  const binary = Bun.which(requested, { PATH: process.env.PATH ?? "" })
   if (!binary) {
     throw new Error(
       `MinIO binary not found: ${requested}. Install minio on PATH or set OPENCODE_TEST_MINIO_BINARY to an executable MinIO binary.`,
@@ -34,7 +46,18 @@ export async function s3Fixture(): Promise<S3Fixture> {
     ],
     {
       env: {
-        ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("MINIO_"))),
+        PATH: process.env.PATH,
+        SystemRoot: process.env.SystemRoot,
+        WINDIR: process.env.WINDIR,
+        HOME: directory.path,
+        USERPROFILE: directory.path,
+        TMPDIR: directory.path,
+        TMP: directory.path,
+        TEMP: directory.path,
+        XDG_CONFIG_HOME: directory.path,
+        XDG_DATA_HOME: directory.path,
+        XDG_STATE_HOME: directory.path,
+        XDG_CACHE_HOME: directory.path,
         MINIO_ROOT_USER: accessKeyId,
         MINIO_ROOT_PASSWORD: secretAccessKey,
         MINIO_BROWSER: "off",

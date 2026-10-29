@@ -1,0 +1,33 @@
+name: Setup test MinIO
+description: Build the checksum-pinned MinIO fixture before entering the offline test namespace
+runs:
+  using: composite
+  steps:
+    - name: Build pinned MinIO
+      shell: bash
+      env:
+        GOTOOLCHAIN: go1.24.6
+        GOPROXY: https://proxy.golang.org
+        GOSUMDB: sum.golang.org
+        GONOSUMDB: ""
+        GONOPROXY: ""
+        GOPRIVATE: ""
+        MINIO_MODULE: github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed
+      run: |
+        set -euo pipefail
+        # RELEASE.2025-09-07T16-13-09Z, commit 07c3a429bfed433e49018cb0f78a52145d4bedeb.
+        go version
+        metadata=$(go mod download -json "$MINIO_MODULE")
+        jq -e '
+          .Version == "v0.0.0-20250907161309-07c3a429bfed" and
+          .Sum == "h1:deu0m9BiyqnMbGWfJi1PpVyotSXlDnTmRIme1cUXnxo=" and
+          .GoModSum == "h1:1J+jI+VgFuV+lYy+kLM1B3+8zFddbdnGqlVH6Yvo/WQ="
+        ' <<< "$metadata"
+        export GOBIN="$RUNNER_TEMP/hermetic-tools/bin"
+        mkdir -p "$GOBIN"
+        go install "$MINIO_MODULE"
+        test -x "$GOBIN/minio"
+        go version -m "$GOBIN/minio"
+        "$GOBIN/minio" --version
+        echo "$GOBIN" >> "$GITHUB_PATH"
+        echo "OPENCODE_TEST_MINIO_BINARY=$GOBIN/minio" >> "$GITHUB_ENV"

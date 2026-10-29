@@ -2,12 +2,12 @@ import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect
 import { define } from "@opencode/plugin/effect/plugin"
 import type { SessionRequest } from "@opencode/plugin/effect/session"
 import { Deferred, Effect, Option, Schema, Semaphore, Stream } from "effect"
-import type { Server } from "node:http"
 import { App } from "../../app.js"
 import { Credential } from "../../credential.js"
 import { Bus } from "../../bus.js"
 import { Integration } from "../../integration.js"
 import { OauthCallbackPage } from "../../oauth/page.js"
+import { OauthCallbackListener } from "../../oauth/callback-listener.js"
 import { Provider } from "../../provider.js"
 import { SessionAffinity } from "../../session/affinity.js"
 import type { PluginInternal } from "../internal.js"
@@ -51,7 +51,7 @@ const Claims = Schema.fromJsonString(
 )
 const decodeClaims = Schema.decodeUnknownOption(Claims)
 
-const browser = (app: App.Info) =>
+const browser = (app: App.Info, listener: OauthCallbackListener.Interface) =>
   ({
     integrationID: Integration.ID.make("openai"),
     method: {
@@ -64,38 +64,43 @@ const browser = (app: App.Info) =>
         const pkce = yield* Effect.promise(generatePKCE)
         const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
         const code = yield* Deferred.make<string, Error>()
-        // Lazy so runtimes without a loopback listener (workerd) never evaluate node:http.
-        const { createServer } = yield* Effect.promise(() => import("node:http"))
-        const server = createServer((request, response) => {
-          const url = new URL(request.url ?? "/", "http://localhost")
-          if (url.pathname !== "/auth/callback") {
-            response.writeHead(404).end("Not found")
-            return
-          }
-          const error = url.searchParams.get("error_description") ?? url.searchParams.get("error")
-          const value = url.searchParams.get("code")
-          if (error) {
-            Effect.runFork(Deferred.fail(code, new Error(error)))
+        const port = yield* listener.listen(
+          (request, response) => {
+            const url = new URL(request.url ?? "/", "http://localhost")
+            if (url.pathname !== "/auth/callback") {
+              response.writeHead(404).end("Not found")
+              return
+            }
+            const error = url.searchParams.get("error_description") ?? url.searchParams.get("error")
+            const value = url.searchParams.get("code")
+            if (error) {
+              Effect.runFork(Deferred.fail(code, new Error(error)))
+              response
+                .writeHead(400, { "Content-Type": "text/html" })
+                .end(OauthCallbackPage.error(error, { provider: "ChatGPT" }))
+              return
+            }
+            if (!value || url.searchParams.get("state") !== state) {
+              const message = value ? "Invalid OAuth state" : "Missing authorization code"
+              Effect.runFork(Deferred.fail(code, new Error(message)))
+              response
+                .writeHead(400, { "Content-Type": "text/html" })
+                .end(OauthCallbackPage.error(message, { provider: "ChatGPT" }))
+              return
+            }
+            Effect.runFork(Deferred.succeed(code, value))
             response
-              .writeHead(400, { "Content-Type": "text/html" })
-              .end(OauthCallbackPage.error(error, { provider: "ChatGPT" }))
-            return
-          }
-          if (!value || url.searchParams.get("state") !== state) {
-            const message = value ? "Invalid OAuth state" : "Missing authorization code"
-            Effect.runFork(Deferred.fail(code, new Error(message)))
-            response
-              .writeHead(400, { "Content-Type": "text/html" })
-              .end(OauthCallbackPage.error(message, { provider: "ChatGPT" }))
-            return
-          }
-          Effect.runFork(Deferred.succeed(code, value))
-          response
-            .writeHead(200, { "Content-Type": "text/html" })
-            .end(OauthCallbackPage.success({ provider: "ChatGPT" }))
-        })
-        const port = yield* listen(server)
-        yield* Effect.addFinalizer(() => Effect.sync(() => server.close()))
+              .writeHead(200, { "Content-Type": "text/html" })
+              .end(OauthCallbackPage.success({ provider: "ChatGPT" }))
+          },
+          {
+            port: callbackPort,
+            fallbackPort: callbackFallbackPort,
+            attempts: callbackBindAttempts,
+            retryDelay: callbackBindRetryDelay,
+            exhausted: `OpenAI browser login needs local port ${callbackPort} or ${callbackFallbackPort}, but both are already in use. Stop the processes using those ports or choose Codex device code (legacy), then try again.`,
+          },
+        )
         const redirect = `http://localhost:${port}/auth/callback`
         return {
           mode: "auto" as const,
@@ -109,66 +114,6 @@ const browser = (app: App.Info) =>
       }),
     refresh: (value) => refresh(browserMethodID, value, app),
   }) satisfies IntegrationOAuthMethodRegistration
-
-function listen(server: Server) {
-  return bind(server, callbackPort).pipe(
-    Effect.as(callbackPort),
-    Effect.catchIf(addressInUse, () =>
-      cancel(callbackPort).pipe(
-        Effect.ignore,
-        Effect.andThen(Effect.sleep(callbackBindRetryDelay)),
-        Effect.andThen(bindWithRetry(server, callbackPort, callbackBindAttempts - 1)),
-        Effect.as(callbackPort),
-        Effect.catchIf(addressInUse, () =>
-          bindWithRetry(server, callbackFallbackPort, callbackBindAttempts).pipe(
-            Effect.as(callbackFallbackPort),
-            Effect.catchIf(addressInUse, () =>
-              Effect.fail(
-                new Error(
-                  `OpenAI browser login needs local port ${callbackPort} or ${callbackFallbackPort}, but both are already in use. Stop the processes using those ports or choose Codex device code (legacy), then try again.`,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  )
-}
-
-function bindWithRetry(server: Server, port: number, attempts: number): Effect.Effect<void, Error> {
-  return bind(server, port).pipe(
-    Effect.catchIf(
-      (error) => addressInUse(error) && attempts > 1,
-      () => Effect.sleep(callbackBindRetryDelay).pipe(Effect.andThen(bindWithRetry(server, port, attempts - 1))),
-    ),
-  )
-}
-
-function bind(server: Server, port: number) {
-  return Effect.callback<void, Error>((resume) => {
-    const onError = (error: Error) => resume(Effect.fail(error))
-    server.once("error", onError)
-    server.listen(port, "localhost", () => {
-      server.off("error", onError)
-      resume(Effect.void)
-    })
-  })
-}
-
-function cancel(port: number) {
-  return Effect.tryPromise({
-    try: (signal) =>
-      fetch(`http://localhost:${port}/cancel`, {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
-      }),
-    catch: (cause) => cause,
-  })
-}
-
-function addressInUse(error: Error) {
-  return "code" in error && error.code === "EADDRINUSE"
-}
 
 const headless = (app: App.Info) =>
   ({
@@ -235,6 +180,10 @@ export const OpenAIPlugin = define({
   id: "opencode.provider.openai",
   effect: Effect.fn(function* (ctx) {
     const bus = yield* Bus.Service
+    const listener = Option.getOrElse(
+      yield* Effect.serviceOption(OauthCallbackListener.Service),
+      () => OauthCallbackListener.native,
+    )
     const loading = Semaphore.makeUnsafe(1)
     let chatgpt: Credential.OAuth | undefined
 
@@ -251,7 +200,7 @@ export const OpenAIPlugin = define({
     })
 
     yield* ctx.integration.transform((editor) => {
-      editor.method.update(browser(ctx.app))
+      editor.method.update(browser(ctx.app, listener))
       editor.method.update(headless(ctx.app))
     })
     yield* load()

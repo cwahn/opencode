@@ -5,6 +5,7 @@ import { S3Files } from "../src/environment/s3.js"
 import type { Options } from "../src/environment/s3.js"
 import { hasS3Fixture, s3Fixture, type S3Fixture } from "./fixture/s3.js"
 import { it } from "./lib/effect.js"
+import { withEnv } from "./fixture/env.js"
 
 const defaults = {
   endpoint: "http://127.0.0.1:1/test",
@@ -16,6 +17,30 @@ const defaults = {
 const bytes = (value: string) => new TextEncoder().encode(value)
 
 describe("S3 namespace", () => {
+  it.effect("required integration coverage cannot silently skip a missing MinIO dependency", () =>
+    withEnv(
+      {
+        OPENCODE_TEST_REQUIRE_S3: "1",
+        OPENCODE_TEST_MINIO_BINARY: undefined,
+        MINIO_BINARY: undefined,
+        OPENCODE_TEST_S3_ENDPOINT: undefined,
+        PATH: "/opencode-test-missing-bin",
+      },
+      () =>
+        Effect.sync(() => {
+          expect(() => hasS3Fixture()).toThrow("Required S3 test dependency missing")
+        }),
+    ),
+  )
+
+  it.effect("required hermetic coverage rejects externally configured S3 endpoints", () =>
+    withEnv({ OPENCODE_TEST_REQUIRE_S3: "1", OPENCODE_TEST_S3_ENDPOINT: "https://external.invalid/bucket" }, () =>
+      Effect.sync(() => {
+        expect(() => hasS3Fixture()).toThrow("cannot use OPENCODE_TEST_S3_ENDPOINT")
+      }),
+    ),
+  )
+
   it.effect(
     "maps only raw, contained same-bucket URIs",
     Effect.sync(() => {
@@ -254,7 +279,7 @@ const endpoint = process.env.OPENCODE_TEST_S3_ENDPOINT
 const bucket = process.env.OPENCODE_TEST_S3_BUCKET
 const accessKeyId = process.env.OPENCODE_TEST_S3_ACCESS_KEY_ID
 const secretAccessKey = process.env.OPENCODE_TEST_S3_SECRET_ACCESS_KEY
-const integration = endpoint || hasS3Fixture() ? it.live : it.live.skip
+const integration = hasS3Fixture() || endpoint ? it.live : it.live.skip
 const state: { fixture?: S3Fixture; options?: Options } = {}
 const options = () => {
   if (!state.options) throw new Error("S3 integration fixture has not started")
