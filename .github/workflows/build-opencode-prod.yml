@@ -1,0 +1,85 @@
+name: build-opencode-prod
+
+on:
+  push:
+    branches: [opencode-prod]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  container:
+    if: github.ref == 'refs/heads/opencode-prod'
+    name: packaged Linux AMD64 S3 smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Bun and locked cross-libc dependencies
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: 1.4.4
+          install-flags: --os='*' --cpu='*' --libc='*'
+
+      - name: Provision archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+          docker buildx version
+          skopeo --version
+          test "$(bun --version)" = 1.4.4
+
+      - name: Provision checksum-pinned MinIO before tests
+        uses: ./.github/actions/setup-minio
+
+      - name: Compile fork using upstream compiler
+        working-directory: packages/cli
+        env:
+          OPENCODE_TARGET: linux-x64-baseline-musl
+          OPENCODE_CHANNEL: opencode-prod
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export OPENCODE_VERSION="2.2.1-s3.${GITHUB_SHA:0:12}"
+          bun run script/build.ts --skip-install
+          git diff --exit-code -- ../../bun.lock package.json
+
+      - name: Build OCI archive, import the archive, and record source provenance
+        run: bash packages/cli/script/container-artifact.sh
+
+      - name: Smoke the exact archived image
+        working-directory: packages/cli
+        env:
+          OPENCODE_CONTAINER_IMAGE: opencode-s3:ci
+          OPENCODE_TEST_REQUIRE_S3: "1"
+        run: bun run script/container-smoke.ts
+
+      - name: Finalize successful provenance and checksums
+        working-directory: packages/cli/dist/container
+        run: |
+          jq -e --arg sha "$GITHUB_SHA" '.revision == $sha' smoke-results.json
+          jq '.packagedImageTestsPassed = true' provenance.json > provenance.accepted.json
+          mv provenance.accepted.json provenance.json
+          sha256sum opencode-s3-linux-amd64.oci.tar buildkit-max.oci.tar provenance.json \
+            build-metadata.json oci-evidence.json runtime-inventory.txt image-inspect.json smoke-results.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      # A candidate is not a release. The parent checks check-hermetic AND this
+      # workflow on this exact SHA before creating an immutable fork release.
+      - name: Preserve validated candidate for gated release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-s3-linux-amd64-${{ github.sha }}
+          path: packages/cli/dist/container/
+          if-no-files-found: error
+          retention-days: 30

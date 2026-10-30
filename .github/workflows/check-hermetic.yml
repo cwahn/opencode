@@ -2,10 +2,11 @@ name: check-hermetic
 
 on:
   push:
-    branches: [s3-headless]
+    branches: [s3-headless, opencode-prod]
   pull_request:
     paths:
       - .github/workflows/check-hermetic.yml
+      - .github/workflows/build-opencode-prod.yml
       - .github/actions/setup-minio/**
       - .github/actions/setup-bun/**
       - packages/**
