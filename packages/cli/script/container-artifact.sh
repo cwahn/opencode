@@ -27,9 +27,15 @@ docker buildx build --platform linux/amd64 --provenance=mode=max --tag opencode-
 python3 packages/cli/script/container-oci.py "$out/buildkit-max.oci.tar" \
   "$out/opencode-s3-linux-amd64.oci.tar" "$out/oci-evidence.json"
 
+# Skopeo's oci-archive unpacker applies tar ownership, which an unprivileged
+# GitHub runner cannot chown to root. Extract our verified, file-only normalized
+# archive without ownership metadata; every OCI blob remains byte-for-byte intact.
+layout=$(mktemp -d "${RUNNER_TEMP:?}/opencode-oci-import.XXXXXX")
+trap 'rm -rf "$layout"' EXIT
+tar --no-same-owner -xf "$out/opencode-s3-linux-amd64.oci.tar" -C "$layout"
 # Convert only the transport for Docker; smoke checks the binary hash after import.
 skopeo copy --override-os linux --override-arch amd64 \
-  "oci-archive:$out/opencode-s3-linux-amd64.oci.tar" docker-daemon:opencode-s3:ci
+  "oci:$layout" docker-daemon:opencode-s3:ci
 test "$(docker image inspect --format '{{.Id}}' opencode-s3:ci)" = "$(jq -r .imageConfigDigest "$out/oci-evidence.json")"
 docker run --rm --entrypoint /bin/sh opencode-s3:ci -c \
   'sha256sum /usr/local/bin/opencode; apk info -v | sort' > "$out/runtime-inventory.txt"
