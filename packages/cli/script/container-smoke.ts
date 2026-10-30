@@ -279,10 +279,21 @@ try {
   const logs = await docker(["logs", server.name])
   assert.ok(!logs.stdout.includes(password), "Server must not print password")
   assert.ok(!logs.stderr.includes(password), "Server must not print password on stderr")
-  assert.ok((await fs.stat(path.join(server.state, path.relative("/state", database)))).size > 0)
+  // Inspect the database as the runtime UID; its private files must not be
+  // readable by the host runner merely to satisfy this fixture assertion.
   assert.equal(
-    (await fs.readFile(path.join(server.state, path.relative("/state", database)))).subarray(0, 16).toString(),
-    "SQLite format 3\0",
+    (
+      await docker([
+        "exec",
+        server.name,
+        "sh",
+        "-c",
+        'test -s "$1" && od -An -tx1 -N16 "$1" | tr -d " \\n"',
+        "sqlite-header",
+        database,
+      ])
+    ).stdout,
+    "53514c69746520666f726d6174203300",
   )
   await stop(server.name)
   evidence.push(
