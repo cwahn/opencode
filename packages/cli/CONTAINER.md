@@ -105,7 +105,11 @@ MinIO upload/get and HTTP read/list/range/write, session creation at `/workspace
 real uploaded PNG/text attachment admission with byte equality, host/missing/
 outside-prefix attachment rejection, no host-file fallback, writable paths,
 effective database `/state/data/opencode.db.s3-<workspace-identity>`, secret-free startup logs, and
-graceful SIGTERM (exit 0, not SIGKILL). It does not execute a model or assert
+handled SIGTERM interruption (exit 130, not SIGKILL). The pinned Effect v4.0.1
+`Runtime.defaultTeardown` returns 130 for interruption-only completion; OpenCode
+uses `NodeRuntime.runMain`, which waits for scoped finalizers. The smoke rejects
+raw SIGTERM exit 143, SIGKILL exit 137, OOM, and deadline/crash exit 1 rather than
+changing upstream shutdown behavior. It does not execute a model or assert
 provider availability. Source-level hermetic tests remain a separate gate.
 The configured `OPENCODE_DB=/state/data/opencode.db` is a base path, not the
 effective S3-profile filename. The server appends the full workspace identity

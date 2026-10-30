@@ -138,7 +138,10 @@ async function stop(name: string) {
   const state = JSON.parse((await docker(["inspect", "--format", "{{json .State}}", name])).stdout)
   assert.equal(state.Running, false)
   assert.equal(state.OOMKilled, false)
-  assert.equal(state.ExitCode, 0, "SIGTERM must gracefully exit, not time out/SIGKILL")
+  // The pinned upstream Effect Runtime.defaultTeardown maps interruption-only
+  // completion to 130 after scoped finalizers finish. A deadline/crash (1), raw
+  // SIGTERM (143), or forced SIGKILL (137) must not satisfy this contract.
+  assert.equal(state.ExitCode, 130, "SIGTERM must complete upstream's handled interruption")
 }
 
 try {
@@ -298,7 +301,7 @@ try {
   await stop(server.name)
   evidence.push(
     "omitted session location resolves /workspace; uploaded text/PNG admission matches bytes; missing/outside-prefix/host attachments rejected",
-    "no host-file fallback; S3-profile identity-namespaced database persisted; graceful SIGTERM exit 0; no password in startup stdout/stderr",
+    "no host-file fallback; S3-profile identity-namespaced database persisted; handled SIGTERM interruption exit 130; no password in startup stdout/stderr",
   )
 
   // Every explicit empty or partial S3 configuration must exit before listening.
