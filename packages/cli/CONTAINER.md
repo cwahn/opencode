@@ -38,7 +38,13 @@ emulation). Its existing Dockerfile stage remains intact. This AMD64 production
 workflow intentionally does not force an ARM64 build or smoke test.
 
 CI builds **once**, retaining the full BuildKit max-provenance OCI archive. The
-normalizer verifies every referenced blob's digest/size and the in-toto
+build explicitly names the local OCI export `opencode-s3:ci` using `--tag`;
+this does not push to a registry. BuildKit v0.33.1 constructs in-toto subjects
+from nonempty exporter image names, so an unnamed export can produce empty
+subjects even though the attestation manifest references the image digest.
+See [BuildKit's subject construction](https://github.com/moby/buildkit/blob/v0.33.1/exporter/containerimage/writer.go#L326-L340).
+Empty subjects remain rejected by the normalizer and its regression test.
+The normalizer verifies every referenced blob's digest/size and the in-toto
 provenance subject's binding to the sole Linux AMD64 image, then exports a
 single-production-manifest archive without changing any manifest/config/layer
 bytes. It imports that production archive into Docker using Skopeo and tests

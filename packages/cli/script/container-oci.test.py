@@ -17,7 +17,7 @@ spec.loader.exec_module(normalizer)
 
 
 class ContainerOCI(unittest.TestCase):
-    def fixture(self, root, subject=None, corrupt=False):
+    def fixture(self, root, subject=None, corrupt=False, empty_subjects=False):
         files = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}'}
 
         def blob(value, media):
@@ -29,7 +29,7 @@ class ContainerOCI(unittest.TestCase):
         config = blob({"os": "linux", "architecture": "amd64", "config": {"Entrypoint": ["opencode"]}},
                       "application/vnd.oci.image.config.v1+json")
         image = blob({"schemaVersion": 2, "config": config, "layers": []}, normalizer.MANIFEST)
-        statement = blob({"subject": [{"digest": {"sha256": subject or image["digest"][7:]}}],
+        statement = blob({"subject": [] if empty_subjects else [{"digest": {"sha256": subject or image["digest"][7:]}}],
                           "predicateType": "https://slsa.dev/provenance/v0.2", "predicate": {}},
                          "application/vnd.in-toto+json")
         attestation = blob({"schemaVersion": 2, "config": blob({}, "application/vnd.oci.image.config.v1+json"),
@@ -80,6 +80,18 @@ class ContainerOCI(unittest.TestCase):
                 normalizer.normalize(source, root / "production.tar", root / "evidence.json")
             self.assertNotIn("private-test-marker", str(error.exception))
             self.assertNotIn("private-test-marker", (root / "oci-subject-diagnostics.json").read_text())
+
+    def test_unnamed_export_empty_subjects_remain_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _, _ = self.fixture(root, empty_subjects=True)
+            with self.assertRaisesRegex(ValueError, "subject binding mismatch"):
+                normalizer.normalize(source, root / "production.tar", root / "evidence.json")
+            diagnostic = json.loads((root / "oci-subject-diagnostics.json").read_text())
+            self.assertEqual(diagnostic["statements"][0]["subjectCount"], 0)
+            self.assertEqual(diagnostic["statements"][0]["actualSubjectSha256Digests"], [])
+            self.assertFalse(diagnostic["statements"][0]["bindingMatches"])
+            self.assertFalse((root / "production.tar").exists())
 
     def test_corrupt_blob_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

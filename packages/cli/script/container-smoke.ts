@@ -143,7 +143,7 @@ async function stop(name: string) {
 
 try {
   const version = await docker(["run", "--rm", image, "--version"])
-  assert.match(version.stdout, /^2\.2\.1-s3\.[a-f0-9]{12}$/)
+  assert.equal(version.stdout, `opencode v2.2.1-s3.${process.env.GITHUB_SHA?.slice(0, 12)}`)
   const rg = await docker(["run", "--rm", "--entrypoint", "rg", image, "--version"])
   assert.match(rg.stdout, /^ripgrep /)
   evidence.push("compiled fork version and packaged ripgrep executable")

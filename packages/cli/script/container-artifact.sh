@@ -13,7 +13,10 @@ base=$(sed -n 's/^FROM \([^ ]*\) AS base$/\1/p' packages/cli/Dockerfile)
 docker buildx create --driver docker-container --use \
   --name "opencode-s3-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 docker buildx inspect --bootstrap
-docker buildx build --platform linux/amd64 --provenance=mode=max \
+# BuildKit derives in-toto subjects from exporter image names. An unnamed OCI
+# export can have a valid attestation manifest but an empty statement subject.
+# This is a local export name only; there is no registry push.
+docker buildx build --platform linux/amd64 --provenance=mode=max --tag opencode-s3:ci \
   --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
   --label "org.opencontainers.image.revision=$GITHUB_SHA" \
   --label "org.opencontainers.image.base.name=$base" \
