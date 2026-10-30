@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import tarfile
 
@@ -54,13 +55,36 @@ def normalize(source, destination, evidence):
     assert len(images) == 1, "expected exactly one Linux AMD64 image"
     descriptor, manifest = images[0]
     digest = descriptor["digest"]
+    diagnostics = {
+        "productionImageDigest": digest,
+        "productionConfigDigest": manifest["config"]["digest"],
+        "buildkitRootIndexDigest": "sha256:" + sha(files["index.json"]),
+        "statements": [],
+    }
+    diagnostic_path = Path(evidence).with_name("oci-subject-diagnostics.json")
+    diagnostic_path.write_text(json.dumps(diagnostics, indent=2) + "\n")
     statements = []
     for attestation, value in attestations:
         assert attestation.get("annotations", {}).get("vnd.docker.reference.digest") == digest
         for layer in value["layers"]:
             assert layer["mediaType"] == "application/vnd.in-toto+json"
             statement = json.loads(blob(layer))
-            assert any(subject.get("digest", {}).get("sha256") == digest[7:] for subject in statement["subject"])
+            # Diagnostics expose only validated SHA-256 strings, never names,
+            # predicate bodies, build environment, or arbitrary subject values.
+            actual = [subject.get("digest", {}).get("sha256") for subject in statement["subject"]]
+            actual_digests = ["sha256:" + item for item in actual
+                              if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)]
+            diagnostics["statements"].append({
+                "attestationManifestDigest": attestation["digest"],
+                "statementBlobDigest": layer["digest"],
+                "expectedImageDigest": digest,
+                "actualSubjectSha256Digests": actual_digests,
+                "subjectCount": len(actual),
+                "bindingMatches": digest[7:] in actual,
+            })
+            diagnostic_path.write_text(json.dumps(diagnostics, indent=2) + "\n")
+            if digest[7:] not in actual:
+                raise ValueError(f"BuildKit subject binding mismatch: expected={digest}, actualSHA256={actual_digests}; see {diagnostic_path.name}")
             statements.append(statement)
     assert any(statement.get("predicateType") in [
         "https://slsa.dev/provenance/v0.2", "https://slsa.dev/provenance/v1",

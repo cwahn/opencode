@@ -69,6 +69,15 @@ the run URL without `/attempts/...`; `ciRunAttempt` records the attempt separate
 workflow's post-success step, after verifying the smoke evidence's source SHA.
 All archive/evidence checksums are generated afresh after this finalization.
 
+If OCI normalization fails, verification remains fail-closed. The workflow
+preserves the original BuildKit archive/metadata and digest-only diagnostics in
+`FAILED-NOT-FOR-DEPLOYMENT-oci-debug-<SHA>-<attempt>` for three days. This debug
+artifact is not a validated candidate and must never be released or deployed.
+`oci-subject-diagnostics.json` records expected production/config/root digests
+and each statement's SHA-256 subjects, without printing subject names, predicate
+bodies, or build environment. Synthetic diagnostic/graph regression tests run
+before packaging; they do not replace actual Linux BuildKit/container acceptance.
+
 This Actions artifact expires after 30 days. It is **not** a durable production
 dependency. Download it promptly for the separately gated release below.
 

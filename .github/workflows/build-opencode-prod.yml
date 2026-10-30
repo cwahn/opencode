@@ -55,7 +55,9 @@ jobs:
           git diff --exit-code -- ../../bun.lock package.json
 
       - name: Build OCI archive, import the archive, and record source provenance
-        run: bash packages/cli/script/container-artifact.sh
+        run: |
+          python3 packages/cli/script/container-oci.test.py
+          bash packages/cli/script/container-artifact.sh
 
       - name: Smoke the exact archived image
         working-directory: packages/cli
@@ -71,7 +73,7 @@ jobs:
           jq '.packagedImageTestsPassed = true' provenance.json > provenance.accepted.json
           mv provenance.accepted.json provenance.json
           sha256sum opencode-s3-linux-amd64.oci.tar buildkit-max.oci.tar provenance.json \
-            build-metadata.json oci-evidence.json runtime-inventory.txt image-inspect.json smoke-results.json > SHA256SUMS
+            build-metadata.json oci-evidence.json oci-subject-diagnostics.json runtime-inventory.txt image-inspect.json smoke-results.json > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       # A candidate is not a release. The parent checks check-hermetic AND this
@@ -83,3 +85,16 @@ jobs:
           path: packages/cli/dist/container/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Preserve failed OCI export for diagnosis ONLY (not deployable)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: FAILED-NOT-FOR-DEPLOYMENT-oci-debug-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            packages/cli/dist/container/buildkit-max.oci.tar
+            packages/cli/dist/container/build-metadata.json
+            packages/cli/dist/container/oci-subject-diagnostics.json
+            packages/cli/dist/container/oci-evidence.json
+          if-no-files-found: warn
+          retention-days: 3
